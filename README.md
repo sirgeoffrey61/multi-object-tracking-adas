@@ -6,10 +6,10 @@ End-to-end perception stack for advanced driver-assistance and autonomous-drivin
 
 | Component | Technology | Role |
 |-----------|------------|------|
-| Detection | Ultralytics YOLOv8 | COCO → KITTI class mapping (car, pedestrian, cyclist) |
-| Tracking | deep-sort-realtime | Appearance + motion association |
-| Lanes | OpenCV Canny + Hough | ROI-based lane line estimation |
-| API | FastAPI + Uvicorn | REST + MJPEG streaming |
+| Perception Module (YOLOv8) | Ultralytics YOLOv8 | COCO → KITTI class mapping (car, pedestrian, cyclist) |
+| State Estimation (DeepSORT) | deep-sort-realtime | Appearance + motion association |
+| Scene Understanding (OpenCV) | OpenCV Canny + Hough | ROI-based lane line estimation |
+| Edge Inference Endpoint | FastAPI + Uvicorn | REST + MJPEG streaming |
 | Dataset | KITTI Object (optional) | Training/evaluation imagery under `data/` |
 
 ## Project layout
@@ -24,6 +24,8 @@ multi-object-tracking-adas/
 ├── data/                 # KITTI (gitignored)
 ├── models/               # Weights (gitignored)
 ├── notebooks/            # Dataset exploration
+├── scripts/            # train, export, benchmark
+├── deployment/         # Jetson Orin TensorRT + inference Docker
 ├── tests/
 ├── Dockerfile
 └── requirements.txt
@@ -101,7 +103,7 @@ docker run -p 8000:8000 -v "%cd%\data:/app/data" mot-adas
 
 Mount `data/` to stream KITTI sequences via `/stream/video?path=...`.
 
-## API endpoints
+## Edge Inference Endpoint
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -155,7 +157,7 @@ Detector tests mock Ultralytics so CI does not download weights.
 
 Evaluated on KITTI training images (`1242×375`) with `yolov8n.pt` and the exploration notebook (`notebooks/01_explore_kitti.ipynb`).
 
-### Detection (YOLOv8n, conf=0.35)
+### Perception Module (YOLOv8n, conf=0.35)
 
 | Image | Cars | Pedestrians | Cyclists |
 |-------|------|-------------|----------|
@@ -164,7 +166,7 @@ Evaluated on KITTI training images (`1242×375`) with `yolov8n.pt` and the explo
 | 000050 | 4 | 0 | 0 |
 | 000100 | 0 | 2 | 0 |
 
-### Tracking (DeepSORT)
+### State Estimation (DeepSORT)
 
 - 23 unique track IDs across 10 frames (`000000`–`000009`)
 - 2.30 average detections per frame
@@ -172,7 +174,7 @@ Evaluated on KITTI training images (`1242×375`) with `yolov8n.pt` and the explo
 
 Note: KITTI object-detection image indices are not consecutive video frames, so cross-frame ID persistence is limited unless you use frames from a single raw sequence.
 
-### Lane Detection (OpenCV Hough)
+### Scene Understanding (OpenCV Hough)
 
 - Detected on clear road images (e.g. `000010` — 1 lane line)
 - ROI-based Canny + Hough; works best on highway-style scenes with visible lane markings
@@ -182,6 +184,24 @@ Note: KITTI object-detection image indices are not consecutive video frames, so 
 
 - 7 cars tracked + 1 lane line on `000010.png`
 - All three modules chained: **detect → track → lanes**
+
+## Production Deployment
+
+- TensorRT export supported (see `deployment/jetson_orin/`)
+- Target: NVIDIA Jetson AGX Orin / DRIVE Orin
+- Pipeline architecture mirrors NVIDIA DRIVE Hyperion stack
+- Docker containerized for edge deployment
+
+```bash
+# Export TensorRT engine (on Jetson with TensorRT)
+bash deployment/jetson_orin/export_trt.sh
+
+# Benchmark PyTorch vs TensorRT
+python scripts/benchmark_trt.py
+
+# Inference-only Docker image
+docker build -f deployment/docker/Dockerfile -t mot-adas-inference .
+```
 
 ## Sample Output
 

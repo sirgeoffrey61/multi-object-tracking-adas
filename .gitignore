@@ -2,6 +2,8 @@
 data/
 models/
 *.pt
+*.engine
+benchmark_results.json
 
 # Python
 __pycache__/
