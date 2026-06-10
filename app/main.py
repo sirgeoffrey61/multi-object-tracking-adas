@@ -27,6 +27,14 @@ _detector: ObjectDetector | None = None
 _tracker: ObjectTracker | None = None
 _lane_detector: LaneDetector | None = None
 
+# In-memory request / latency metrics (no external collector required).
+_app_start_time: float = time.time()
+_total_requests: int = 0
+_total_inference_ms: float = 0.0
+
+DEFAULT_MODEL_NAME = "kitti-yolov8n"
+DEFAULT_MAP50 = 0.8521
+
 
 def _project_root() -> str:
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -55,6 +63,40 @@ def _get_lane_detector() -> LaneDetector:
     if _lane_detector is None:
         _lane_detector = LaneDetector()
     return _lane_detector
+
+
+def _device_label() -> str:
+    try:
+        import torch
+
+        return "cuda" if torch.cuda.is_available() else "cpu"
+    except ImportError:
+        return "cpu"
+
+
+def _model_name() -> str:
+    path = os.environ.get("YOLO_MODEL_PATH", "")
+    if path:
+        stem = os.path.splitext(os.path.basename(path))[0]
+        if stem and stem != "yolov8n":
+            return stem
+    return os.environ.get("MODEL_NAME", DEFAULT_MODEL_NAME)
+
+
+def _model_map50() -> float:
+    raw = os.environ.get("MODEL_MAP50")
+    if raw is not None:
+        try:
+            return float(raw)
+        except ValueError:
+            pass
+    return DEFAULT_MAP50
+
+
+def _record_inference(inference_ms: float) -> None:
+    global _total_requests, _total_inference_ms
+    _total_requests += 1
+    _total_inference_ms += inference_ms
 
 
 # ---------------------------------------------------------------------------
@@ -233,7 +275,15 @@ class VideoPipeline:
 
 class HealthResponse(BaseModel):
     status: str
-    version: str
+    model: str
+    mAP50: float
+    device: str
+
+
+class MetricsResponse(BaseModel):
+    total_requests: int
+    avg_inference_ms: float
+    uptime_seconds: float
 
 
 class FrameRequest(BaseModel):
@@ -262,9 +312,22 @@ app = FastAPI(
 
 @app.get("/health", response_model=HealthResponse)
 def health() -> HealthResponse:
-    from app import __version__
+    return HealthResponse(
+        status="ok",
+        model=_model_name(),
+        mAP50=_model_map50(),
+        device=_device_label(),
+    )
 
-    return HealthResponse(status="ok", version=__version__)
+
+@app.get("/metrics", response_model=MetricsResponse)
+def metrics() -> MetricsResponse:
+    avg_ms = _total_inference_ms / _total_requests if _total_requests else 0.0
+    return MetricsResponse(
+        total_requests=_total_requests,
+        avg_inference_ms=round(avg_ms, 3),
+        uptime_seconds=round(time.time() - _app_start_time, 2),
+    )
 
 
 @app.post("/inference/image")
@@ -276,7 +339,9 @@ async def inference_image(
     data = await file.read()
     frame = _decode_upload_to_bgr(data)
     pipeline = VideoPipeline(enable_lanes=enable_lanes)
+    t0 = time.perf_counter()
     annotated, meta = pipeline.process_frame(frame)
+    _record_inference((time.perf_counter() - t0) * 1000.0)
     meta["image_b64"] = _encode_image_b64(annotated)
     return JSONResponse(content=meta)
 
@@ -291,7 +356,9 @@ async def inference_frame(body: FrameRequest) -> JSONResponse:
 
     frame = _decode_upload_to_bgr(raw)
     pipeline = VideoPipeline(enable_lanes=body.enable_lanes)
+    t0 = time.perf_counter()
     annotated, meta = pipeline.process_frame(frame)
+    _record_inference((time.perf_counter() - t0) * 1000.0)
     if body.return_image:
         meta["image_b64"] = _encode_image_b64(annotated)
     return JSONResponse(content=meta)
@@ -308,7 +375,9 @@ async def inference_video(file: UploadFile = File(...)) -> JSONResponse:
     output_path = input_path + "_out.mp4"
     try:
         pipeline = VideoPipeline()
+        t0 = time.perf_counter()
         stats = pipeline.process_video_file(input_path, output_path)
+        _record_inference((time.perf_counter() - t0) * 1000.0)
         with open(output_path, "rb") as f:
             stats["video_b64"] = base64.b64encode(f.read()).decode("ascii")
         return JSONResponse(content=stats)
